@@ -1,0 +1,278 @@
+import win32com.client as win32
+import os
+import customtkinter as ctk
+from tkinter import filedialog, messagebox
+import sys
+import json
+import urllib.parse
+
+# --- CONFIGURAÇÕES DE ESTILO ---
+ctk.set_appearance_mode("Dark") 
+
+BRAND_BLUE = "#0078D4"
+BRAND_ORANGE = "#F47920"
+ICE_WHITE = "#E1E1E1"
+CARD_BG = "#242424"
+
+class EmailAutomationApp(ctk.CTk):
+    """
+    Aplicativo de automação para disparo de e-mails personalizados via Outlook
+    com suporte a anexos e botões de resposta rápida (mailto).
+    """
+    def __init__(self):
+        super().__init__()
+
+        self.title("Sistema de Automação de E-mails")
+        self.geometry("1200x900")
+        self.configure(fg_color="#1a1a1a") 
+
+        # Variáveis de Estado
+        self.selected_attachments = []
+        self.queue = []
+        self.config_file = "config_vendas.json"
+        
+        # Definição de caminhos para recursos (Logo/Banner)
+        if getattr(sys, 'frozen', False):
+            self.base_path = os.path.dirname(os.path.realpath(sys.executable))
+        else:
+            self.base_path = os.path.dirname(os.path.abspath(__file__))
+
+        self.init_ui()
+        self.load_config()
+
+    def init_ui(self):
+        """Inicializa a interface principal e abas."""
+        self.header_label = ctk.CTkLabel(
+            self, text="AUTOMAÇÃO DE E-MAILS PROFISSIONAIS", 
+            font=("Segoe UI", 26, "bold"), text_color=BRAND_ORANGE
+        )
+        self.header_label.pack(pady=(20, 10))
+
+        self.tabview = ctk.CTkTabview(self, segmented_button_selected_color=BRAND_BLUE)
+        self.tabview.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        self.tab_send = self.tabview.add("ENVIAR E-MAILS")
+        self.tab_profile = self.tabview.add("PERFIL / ASSINATURA")
+        self.tab_buttons = self.tabview.add("CONFIG. BOTÕES")
+
+        self.setup_send_tab()
+        self.setup_profile_tab()
+        self.setup_buttons_tab()
+
+    # --- ABA: PERFIL ---
+    def setup_profile_tab(self):
+        ctk.CTkLabel(self.tab_profile, text="DADOS DO REMETENTE", font=("Segoe UI", 18, "bold"), text_color=BRAND_ORANGE).pack(pady=20)
+        self.user_name = self.create_simple_input(self.tab_profile, "Nome Completo:")
+        self.user_job = self.create_simple_input(self.tab_profile, "Cargo/Departamento:")
+        self.user_phone = self.create_simple_input(self.tab_profile, "Telefone de Contato:")
+        self.user_email = self.create_simple_input(self.tab_profile, "E-mail de Resposta:")
+        
+        ctk.CTkButton(self.tab_profile, text="SALVAR PERFIL", command=self.save_config, fg_color=BRAND_BLUE).pack(pady=20)
+
+    # --- ABA: BOTÕES ---
+    def setup_buttons_tab(self):
+        ctk.CTkLabel(self.tab_buttons, text="BOTÕES DE RESPOSTA RÁPIDA", font=("Segoe UI", 18, "bold"), text_color=BRAND_ORANGE).pack(pady=20)
+        
+        grid_frame = ctk.CTkFrame(self.tab_buttons, fg_color="transparent")
+        grid_frame.pack(fill="x", padx=50)
+
+        # Configuração dos campos dinâmicos
+        self.btn_entries = []
+        for i in range(3):
+            name_entry = ctk.CTkEntry(grid_frame, width=250, placeholder_text=f"Nome do Botão {i+1}")
+            name_entry.grid(row=i, column=0, padx=10, pady=10)
+            
+            body_entry = ctk.CTkEntry(grid_frame, width=550, placeholder_text="Texto que virá no corpo do e-mail ao clicar")
+            body_entry.grid(row=i, column=1, padx=10, pady=10)
+            
+            # Bind para auto-preenchimento
+            name_entry.bind("<KeyRelease>", lambda e, n=name_entry, b=body_entry: self.update_auto_msg(n, b))
+            self.btn_entries.append((name_entry, body_entry))
+
+        ctk.CTkButton(self.tab_buttons, text="SALVAR CONFIGURAÇÕES", command=self.save_config, fg_color=BRAND_BLUE).pack(pady=30)
+
+    # --- ABA: ENVIO ---
+    def setup_send_tab(self):
+        # Assunto e CC
+        top_frame = ctk.CTkFrame(self.tab_send, fg_color="transparent")
+        top_frame.pack(fill="x", padx=20, pady=5)
+
+        self.cc_entry = self.create_inline_input(top_frame, "CC:", "email@exemplo.com")
+        self.subject_entry = self.create_inline_input(top_frame, "Assunto:", "Sua Oportunidade")
+
+        # Arquivos
+        file_frame = ctk.CTkFrame(self.tab_send, fg_color="transparent")
+        file_frame.pack(fill="x", padx=20, pady=10)
+        
+        ctk.CTkButton(file_frame, text="📎 Anexar Arquivos", command=self.select_files).pack(side="left", padx=10)
+        self.include_btns_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(file_frame, text="Incluir botões de retorno", variable=self.include_btns_var).pack(side="left", padx=10)
+        self.files_label = ctk.CTkLabel(file_frame, text="Nenhum arquivo", text_color="gray")
+        self.files_label.pack(side="left", padx=10)
+
+        # Editor de Contatos e Mensagem
+        content_frame = ctk.CTkFrame(self.tab_send, fg_color="transparent")
+        content_frame.pack(fill="both", expand=True, padx=20)
+        
+        self.contacts_txt = self.create_text_area(content_frame, "Contatos (Nome, E-mail):", "Esquerda")
+        self.msg_txt = self.create_text_area(content_frame, "Corpo do E-mail ({name}):", "Direita")
+        self.msg_txt.insert("0.0", "Olá {name},\n\nSegue a proposta conforme conversamos.")
+
+        # Botão Disparo
+        self.send_btn = ctk.CTkButton(self.tab_send, text="INICIAR DISPARO", command=self.start_automation, 
+                                     fg_color=BRAND_ORANGE, font=("Segoe UI", 18, "bold"), height=60)
+        self.send_btn.pack(pady=10)
+        
+        self.status_label = ctk.CTkLabel(self.tab_send, text="Status: Pronto")
+        self.status_label.pack()
+
+    # --- LÓGICA DE NEGÓCIO ---
+    def send_single_email(self, name, dest_email):
+        try:
+            user_data = {
+                "n": self.user_name.get(), "j": self.user_job.get(),
+                "p": self.user_phone.get(), "e": self.user_email.get()
+            }
+            
+            outlook = win32.Dispatch('outlook.application')
+            mail = outlook.CreateItem(0)
+            mail.Subject = self.subject_entry.get()
+            mail.To = dest_email
+            if self.cc_entry.get(): mail.CC = self.cc_entry.get()
+
+            # Anexos Selecionados
+            for path in self.selected_attachments:
+                if os.path.exists(path): mail.Attachments.Add(path)
+
+            # Imagens da Assinatura (Se existirem na pasta)
+            self.attach_embedded_image(mail, "logo.png", "logo_cid")
+            self.attach_embedded_image(mail, "banner.jpg", "banner_cid")
+
+            # Construção do HTML
+            cta_html = self.generate_cta_buttons(user_data['e'])
+            body_text = self.msg_txt.get("1.0", "end-1c").replace("{name}", name).replace("\n", "<br>")
+            
+            mail.HTMLBody = f"""
+            <html><body style="font-family: Arial, sans-serif; color: #333;">
+                {body_text}
+                {cta_html}
+                <br>Atenciosamente,<br><br>
+                <table border="0" cellspacing="0" cellpadding="0">
+                    <tr>
+                        <td style="border-right: 2px solid {BRAND_BLUE}; padding-right: 20px;">
+                            <span style="font-size: 16px;"><b>{user_data['n']}</b></span><br>
+                            <span style="color: #666;">{user_data['j']}</span><br>
+                            <b>{user_data['p']}</b><br>
+                            <a href="mailto:{user_data['e']}" style="color: {BRAND_BLUE};">{user_data['e']}</a><br>
+                            <a href="http://www.seusite.com" style="color: {BRAND_BLUE}; font-weight: bold;">www.seusite.com</a>
+                        </td>
+                        <td style="padding-left: 20px;"><img src="cid:logo_cid" width="120"></td>
+                    </tr>
+                </table>
+                <br><img src="cid:banner_cid" width="500">
+            </body></html>"""
+            
+            mail.Send()
+        except Exception as e:
+            print(f"Erro ao enviar para {dest_email}: {e}")
+
+    # --- AUXILIARES ---
+    def attach_embedded_image(self, mail, filename, cid):
+        path = os.path.normpath(os.path.join(self.base_path, filename))
+        if os.path.exists(path):
+            att = mail.Attachments.Add(path)
+            att.PropertyAccessor.SetProperty("http://schemas.microsoft.com/mapi/proptag/0x3712001F", cid)
+
+    def generate_cta_buttons(self, user_email):
+        if not self.include_btns_var.get(): return ""
+        html = '<table style="margin: 20px 0;"><tr>'
+        for name_ent, body_ent in self.btn_entries:
+            name, body = name_ent.get(), body_ent.get()
+            if name:
+                link = f"mailto:{user_email}?subject=Retorno: {name}&body={urllib.parse.quote(body)}"
+                html += f'''<td style="padding-right: 15px;">
+                    <a href="{link}" style="background:{BRAND_BLUE}; color:white; padding:10px 20px; text-decoration:none; border-radius:5px; font-weight:bold;">{name}</a>
+                </td>'''
+        return html + '</tr></table>'
+
+    def update_auto_msg(self, entry_name, entry_body):
+        texto = entry_name.get()
+        entry_body.delete(0, "end")
+        entry_body.insert(0, f"Confirmo que o status é: {texto}")
+
+    def select_files(self):
+        files = filedialog.askopenfilenames()
+        if files:
+            self.selected_attachments = list(files)
+            self.files_label.configure(text=f"{len(files)} arquivo(s) selecionado(s)", text_color=BRAND_ORANGE)
+
+    # --- PERSISTÊNCIA ---
+    def save_config(self):
+        data = {
+            "name": self.user_name.get(), "job": self.user_job.get(), 
+            "phone": self.user_phone.get(), "email": self.user_email.get(),
+            "btns": [{"name": e[0].get(), "body": e[1].get()} for e in self.btn_entries]
+        }
+        with open(self.config_file, "w") as f: json.dump(data, f)
+        messagebox.showinfo("Sucesso", "Configurações salvas com sucesso!")
+
+    def load_config(self):
+        if os.path.exists(self.config_file):
+            with open(self.config_file, "r") as f:
+                data = json.load(f)
+                self.user_name.insert(0, data.get("name", "Seu Nome"))
+                self.user_job.insert(0, data.get("job", "Cargo"))
+                self.user_phone.insert(0, data.get("phone", "(00) 0000-0000"))
+                self.user_email.insert(0, data.get("email", "seu@email.com"))
+                for i, btn in enumerate(data.get("btns", [])):
+                    if i < len(self.btn_entries):
+                        self.btn_entries[i][0].insert(0, btn.get("name", ""))
+                        self.btn_entries[i][1].insert(0, btn.get("body", ""))
+
+    def start_automation(self):
+        raw = self.contacts_txt.get("1.0", "end-1c")
+        self.queue = [line.strip() for line in raw.split('\n') if ',' in line]
+        if not self.queue:
+            messagebox.showwarning("Aviso", "Nenhum contato válido encontrado (use Nome, E-mail)")
+            return
+        self.send_btn.configure(state="disabled")
+        self.process_queue()
+
+    def process_queue(self):
+        if not self.queue:
+            self.status_label.configure(text="✅ Concluído!", text_color="#4CFF4C")
+            self.send_btn.configure(state="normal")
+            return
+        
+        line = self.queue.pop(0)
+        name, email = line.split(',')
+        self.status_label.configure(text=f"Enviando para: {name.strip()}...")
+        self.send_single_email(name.strip(), email.strip())
+        self.after(1000, self.process_queue) # Delay de 1s para não sobrecarregar
+
+    # --- COMPONENTES UI AUXILIARES ---
+    def create_simple_input(self, master, label):
+        ctk.CTkLabel(master, text=label).pack(anchor="w", padx=150)
+        entry = ctk.CTkEntry(master, width=400, border_color=BRAND_BLUE)
+        entry.pack(pady=5)
+        return entry
+
+    def create_inline_input(self, master, label, placeholder):
+        frame = ctk.CTkFrame(master, fg_color="transparent")
+        frame.pack(side="left", fill="x", expand=True, padx=5)
+        ctk.CTkLabel(frame, text=label).pack(side="left", padx=5)
+        entry = ctk.CTkEntry(frame, placeholder_text=placeholder, border_color=BRAND_BLUE)
+        entry.pack(side="left", fill="x", expand=True)
+        return entry
+
+    def create_text_area(self, master, label, side):
+        frame = ctk.CTkFrame(master, fg_color="transparent")
+        frame.pack(side=side.lower(), fill="both", expand=True, padx=10)
+        ctk.CTkLabel(frame, text=label).pack(anchor="w")
+        txt = ctk.CTkTextbox(frame, border_width=2, border_color=BRAND_BLUE, fg_color=CARD_BG)
+        txt.pack(fill="both", expand=True, pady=5)
+        return txt
+
+if __name__ == "__main__":
+    app = EmailAutomationApp()
+    app.mainloop()
